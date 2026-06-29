@@ -85,7 +85,13 @@ fn real_engine_add_record() {
     let stats = engine.get_stats();
     assert!(stats.is_ok(), "get_stats failed: {:?}", stats.err());
 
-    SzEnvironmentCore::destroy_global_instance().expect("failed to destroy environment");
+    // NOTE: do NOT call destroy_global_instance() here. The Senzing engine is a
+    // process-global singleton shared across every test in this binary. Tearing
+    // it down mid-suite leaves the singleton's is_initialized flag true while the
+    // native engine is gone, so the next test's get_instance() returns a DEAD
+    // engine and add_record()/get_stats() fail. Process exit reclaims the
+    // singleton. The suite is also run with --test-threads=1 (see ci.yml) so
+    // parallel get_instance() init cannot race.
 }
 
 /// Confirms a deliberately malformed record is classified for the dead-letter
@@ -124,5 +130,5 @@ fn real_engine_bad_record_is_dead_lettered() {
         );
     }
 
-    SzEnvironmentCore::destroy_global_instance().expect("failed to destroy environment");
+    // See note above: the global singleton must outlive individual tests.
 }
