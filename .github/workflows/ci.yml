@@ -1,0 +1,335 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # build.rs links dylib=Sz from here; provided by the Senzing runtime container.
+  SENZING_LIB_PATH: /opt/senzing/er/lib
+  LD_LIBRARY_PATH: /opt/senzing/er/lib
+
+jobs:
+  # fmt + clippy do not link a final binary, but the build graph references the
+  # native Senzing library, so every Rust job runs inside the pinned Senzing
+  # runtime image (which ships /opt/senzing/er/lib). The image is pinned (NOT
+  # :latest) for reproducibility, and `--user root` is required because rustup /
+  # cargo install cannot write to the toolchain dirs as the image's default
+  # non-root user.
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    container:
+      image: senzing/senzingsdk-runtime:4.3.2
+      options: --user root
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned 2026-06-29)
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo + target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    container:
+      image: senzing/senzingsdk-runtime:4.3.2
+      options: --user root
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned 2026-06-29)
+        with:
+          toolchain: 1.88.0
+
+      - name: Cache cargo + target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-build-
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Run unit tests
+        run: cargo test --bins
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    container:
+      image: senzing/senzingsdk-runtime:4.3.2
+      options: --user root
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: senzing
+          POSTGRES_PASSWORD: senzing
+          POSTGRES_DB: G2
+        options: >-
+          --health-cmd "pg_isready -U senzing -d G2"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3-management
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: senzing
+      POSTGRES_PASSWORD: senzing
+      POSTGRES_DB: G2
+      PGPASSWORD: senzing
+      SENZING_AMQP_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      SENZING_RABBITMQ_QUEUE: senzing-rabbitmq-queue
+      # Engine connection uses Senzing's colon-form (host:port:database). The
+      # Senzing C engine expects the database name after a COLON, not a slash;
+      # the slash form is parsed as a database literally named "/G2" and fails.
+      SENZING_ENGINE_CONFIGURATION_JSON: >-
+        {"PIPELINE":{"CONFIGPATH":"/etc/opt/senzing","RESOURCEPATH":"/opt/senzing/er/resources","SUPPORTPATH":"/opt/senzing/data"},"SQL":{"CONNECTION":"postgresql://senzing:senzing@postgres:5432:G2"}}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev
+
+      - name: Install Senzing init tooling
+        # senzingsdk-setup ships the schema DDL under /opt/senzing/er/resources/schema.
+        # senzingsdk-tools ships the Python SDK (senzing_core) used to register the
+        # default ER configuration. psql + psycopg2 provide DB access.
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            senzingsdk-setup senzingsdk-tools \
+            postgresql-client python3 python3-psycopg2
+
+      - name: Initialize Senzing repository (schema DDL + default config)
+        # Authoritative init sequence (mirrors sz_init_postgresql-v4/init-postgresql.py):
+        #   1. apply the engine schema DDL to the Postgres database (psql, slash-form URL),
+        #   2. register the default ER configuration via the Senzing Python SDK.
+        # The Rust SDK's split SzConfigMgr_init rejects an empty datastore (SENZ7220),
+        # so config registration uses the Python SDK exactly as the reference repo does.
+        run: |
+          set -euo pipefail
+          psql "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}" \
+            -q -v ON_ERROR_STOP=1 \
+            -f /opt/senzing/er/resources/schema/szcore-schema-postgresql-create.sql
+          export PYTHONPATH=/opt/senzing/er/sdk/python:${PYTHONPATH:-}
+          python3 - <<'PY'
+          import os
+          import senzing_core
+
+          settings = os.environ["SENZING_ENGINE_CONFIGURATION_JSON"]
+          factory = senzing_core.SzAbstractFactoryCore("ci_init", settings)
+          config_mgr = factory.create_configmanager()
+          if not config_mgr.get_default_config_id():
+              config = config_mgr.create_config_from_template()
+              config_mgr.set_default_config(config.export(), "CI initial configuration")
+          print("default config id:", config_mgr.get_default_config_id())
+          factory.destroy()
+          PY
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned 2026-06-29)
+        with:
+          toolchain: 1.88.0
+
+      - name: Cache cargo + target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
+
+      - name: Run integration tests
+        # --test-threads=1: the Senzing engine is a process-global singleton;
+        # parallel get_instance() calls race its init. Serialize the suite.
+        run: cargo test --test integration_test -- --nocapture --test-threads=1
+
+  coverage:
+    name: Code Coverage
+    # Coverage is an informational metric (codecov upload uses
+    # fail_ci_if_error: false). Keep the job — we still want coverage when it
+    # works — but never let a fragile coverage run gate merge.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    container:
+      image: senzing/senzingsdk-runtime:4.3.2
+      options: --user root
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: senzing
+          POSTGRES_PASSWORD: senzing
+          POSTGRES_DB: G2
+        options: >-
+          --health-cmd "pg_isready -U senzing -d G2"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3-management
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: senzing
+      POSTGRES_PASSWORD: senzing
+      POSTGRES_DB: G2
+      PGPASSWORD: senzing
+      SENZING_AMQP_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      SENZING_RABBITMQ_QUEUE: senzing-rabbitmq-queue
+      # Same colon-form engine connection as the integration job (see note there).
+      SENZING_ENGINE_CONFIGURATION_JSON: >-
+        {"PIPELINE":{"CONFIGPATH":"/etc/opt/senzing","RESOURCEPATH":"/opt/senzing/er/resources","SUPPORTPATH":"/opt/senzing/data"},"SQL":{"CONNECTION":"postgresql://senzing:senzing@postgres:5432:G2"}}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev
+
+      - name: Install Senzing init tooling
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            senzingsdk-setup senzingsdk-tools \
+            postgresql-client python3 python3-psycopg2
+
+      - name: Initialize Senzing repository (schema DDL + default config)
+        run: |
+          set -euo pipefail
+          psql "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}" \
+            -q -v ON_ERROR_STOP=1 \
+            -f /opt/senzing/er/resources/schema/szcore-schema-postgresql-create.sql
+          export PYTHONPATH=/opt/senzing/er/sdk/python:${PYTHONPATH:-}
+          python3 - <<'PY'
+          import os
+          import senzing_core
+
+          settings = os.environ["SENZING_ENGINE_CONFIGURATION_JSON"]
+          factory = senzing_core.SzAbstractFactoryCore("ci_init", settings)
+          config_mgr = factory.create_configmanager()
+          if not config_mgr.get_default_config_id():
+              config = config_mgr.create_config_from_template()
+              config_mgr.set_default_config(config.export(), "CI initial configuration")
+          print("default config id:", config_mgr.get_default_config_id())
+          factory.destroy()
+          PY
+
+      - name: Install Rust toolchain
+        # Coverage tooling is not MSRV-bound: cargo-tarpaulin's deps require a
+        # newer rustc than the pinned 1.88, so build this job on latest stable.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned 2026-06-29)
+        with:
+          toolchain: stable
+
+      - name: Cache cargo + target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
+
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: Generate coverage
+        # --test-threads=1 (after --): same Senzing global-singleton race as the
+        # integration job; tarpaulin runs the integration tests too, so serialize.
+        run: cargo tarpaulin --verbose --out Xml -- --test-threads=1
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
+        with:
+          files: ./cobertura.xml
+          fail_ci_if_error: false
+
+  docker:
+    name: Docker build (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Only the PostgreSQL variant is built. The MSSQL (and "both") variants
+          # CANNOT build today: the upstream packages.microsoft.com repository
+          # rejects its SHA1-signed key after 2026-02-01, so apt fails inside the
+          # image build and CI would be permanently red.
+          # TODO: re-add `mssql` and `both` matrix entries when Microsoft
+          # re-signs the apt repository key.
+          - backend: postgres
+            args: "WITH_POSTGRES=1 WITH_MSSQL=0"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+
+      - name: Build image
+        run: |
+          BUILD_ARGS=""
+          for kv in ${{ matrix.args }}; do BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done
+          docker build $BUILD_ARGS -t sz_rabbit_consumer_rust:${{ matrix.backend }} .
