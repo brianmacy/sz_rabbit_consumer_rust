@@ -1,0 +1,38 @@
+[package]
+name = "sz_rabbit_consumer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Brian Macy"]
+description = "RabbitMQ consumer that adds records to Senzing (Rust port of sz_rabbit_consumer-v4)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "sz_rabbit_consumer"
+path = "src/main.rs"
+
+[lib]
+name = "sz_rabbit_consumer"
+path = "src/lib.rs"
+
+[dependencies]
+sz-rust-sdk = { git = "https://github.com/brianmacy/sz-rust-sdk", rev = "b595ca4" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+lapin = "4"
+futures-lite = "2"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+num_cpus = "1"
+
+[dev-dependencies]
+lapin = "4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
