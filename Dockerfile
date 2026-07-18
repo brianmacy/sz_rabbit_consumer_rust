@@ -16,7 +16,7 @@
 # identical between the two repos; only the builder's source layout, the app
 # binary name in the final COPY, and the ENTRYPOINT differ.
 
-ARG SENZING_RUNTIME_IMAGE=senzing/senzingsdk-runtime:4.3.2
+ARG SENZING_RUNTIME_IMAGE=senzing/senzingsdk-runtime:4.3.3
 ARG RUST_IMAGE=rust:1.88
 
 # Global build args (declared before the first FROM so the backend-libs stage
@@ -31,7 +31,7 @@ FROM ${RUST_IMAGE} AS builder
 
 # Bring in the Senzing runtime so the sz-rust-sdk build.rs can link dylib=Sz. It
 # searches /opt/senzing/er/lib by default (overridable via SENZING_LIB_PATH).
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /opt/senzing /opt/senzing
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /opt/senzing /opt/senzing
 ENV SENZING_LIB_PATH=/opt/senzing/er/lib
 ENV LD_LIBRARY_PATH=/opt/senzing/er/lib
 
@@ -132,7 +132,7 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # Stage 3: runtime — distroless. No interpreter, no apt, no shell.
 # ---------------------------------------------------------------------------
-# Runtime base MUST match the glibc of senzingsdk-runtime. As of 4.3.2 that base
+# Runtime base MUST match the glibc of senzingsdk-runtime. As of 4.3.3 that base
 # is Debian 13 (trixie, glibc 2.41), so cc-debian13 is required — cc-debian12
 # (glibc 2.36) fails at runtime with "GLIBC_2.38 not found" when the trixie-built
 # libpq is loaded. Verified empirically.
@@ -144,17 +144,17 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 # entire lib directory guarantees the engine's full plugin set is present; the
 # ECreator libs (libg2*ECreator.so) ship in the runtime image and are required
 # by the engine (their absence raises SENZ0087).
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /opt/senzing/er/lib       /opt/senzing/er/lib
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /opt/senzing/er/resources /opt/senzing/er/resources
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /opt/senzing/er/szBuildVersion.json /opt/senzing/er/szBuildVersion.json
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /opt/senzing/er/lib       /opt/senzing/er/lib
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /opt/senzing/er/resources /opt/senzing/er/resources
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /opt/senzing/er/szBuildVersion.json /opt/senzing/er/szBuildVersion.json
 
 # SUPPORTPATH data (transliteration models, name/address data models, etc.) and
 # the CONFIGPATH templates. The engine loads these at init — measured: omitting
 # /opt/senzing/data raises SENZ7426 (e.g. "Could not load transliterator module:
 # thaiTransRules.sz"). The default engine config points SUPPORTPATH at
 # /opt/senzing/data and CONFIGPATH at /etc/opt/senzing.
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /opt/senzing/data /opt/senzing/data
-COPY --from=senzing/senzingsdk-runtime:4.3.2 /etc/opt/senzing  /etc/opt/senzing
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /opt/senzing/data /opt/senzing/data
+COPY --from=senzing/senzingsdk-runtime:4.3.3 /etc/opt/senzing  /etc/opt/senzing
 
 # Backend-specific libraries + ODBC ini files + driver tree assembled in stage 2.
 #
