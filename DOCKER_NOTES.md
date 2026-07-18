@@ -9,14 +9,14 @@ issue (see below).
 ## Image versions (and why they must match)
 
 - Builder base: `rust:1.88`.
-- Senzing runtime source: `senzing/senzingsdk-runtime:4.3.2` — **Debian 13
+- Senzing runtime source: `senzing/senzingsdk-runtime:4.3.3` — **Debian 13
   (trixie), glibc 2.41**.
 - Runtime base: `gcr.io/distroless/cc-debian13:nonroot` — **glibc 2.41**.
 
 ### The runtime base must be cc-debian13, NOT cc-debian12
 
 The plan specified `gcr.io/distroless/cc-debian12`. That is WRONG for the
-current Senzing runtime image: `senzing/senzingsdk-runtime:4.3.2` is built on
+current Senzing runtime image: `senzing/senzingsdk-runtime:4.3.3` is built on
 Debian 13 (trixie, glibc 2.41), but `cc-debian12` ships glibc 2.36. The
 trixie-built `libpq.so.5` requires `GLIBC_2.38`, so on cc-debian12 the engine
 fails at runtime:
@@ -32,12 +32,12 @@ Switching the runtime base to `gcr.io/distroless/cc-debian13:nonroot` (glibc
 `libcrypto.so.3`, `libgomp.so.1`) resolves it. Keep the distroless Debian
 generation aligned with the senzingsdk-runtime base on every version bump.
 
-### Version note (4.3.2 vs 4.4.0)
+### Version note (4.3.3 vs 4.4.0)
 
 The plan referenced `senzing/senzingsdk-runtime:4.4.0`, and the locally
 installed SDK on the dev box is 4.4.0. However, **4.4.0 is not published to
-Docker Hub** — the newest published tag is `4.3.2` (verified via the Docker Hub
-tags API). The Dockerfile pins `4.3.2`. When 4.4.0 is published, bump
+Docker Hub** — the newest published tag is `4.3.3` (verified via the Docker Hub
+tags API). The Dockerfile pins `4.3.3`. When 4.4.0 is published, bump
 `SENZING_RUNTIME_IMAGE` + the `COPY --from` refs, and re-check the runtime
 image's Debian generation against the distroless tag.
 
@@ -64,7 +64,7 @@ copying the whole `/opt/senzing/er/lib` directory captures them. No separate
 `senzingsdk-setup` step is required.
 
 ```bash
-cid=$(docker create --entrypoint /nonexistent senzing/senzingsdk-runtime:4.3.2)
+cid=$(docker create --entrypoint /nonexistent senzing/senzingsdk-runtime:4.3.3)
 docker export "$cid" | tar -t | grep -iE 'ECreator'
 docker rm "$cid"
 # -> opt/senzing/er/lib/libg2CreditCardECreator.so
@@ -89,7 +89,7 @@ were found by running the binary and reading the actual error:
   custom Gn/On/Sn lists).
 
 Both are now copied in the COMMON section. (The plan's `libszvec.so`/
-`libszzstd.so` names are also stale — in 4.3.2 they are `szvec.so`/`szzstd.so`
+`libszzstd.so` names are also stale — in 4.3.3 they are `szvec.so`/`szzstd.so`
 inside er/lib, captured automatically by the whole-directory copy.)
 
 ## Backend libraries go in /opt/senzing/er/lib, not /lib/x86_64-linux-gnu
