@@ -77,7 +77,7 @@ fn real_engine_add_record() {
         &info.data_source,
         &info.record_id,
         body,
-        Some(SzFlags::ADD_RECORD_DEFAULT),
+        Some(SzFlags::ADD_RECORD_DEFAULT_FLAGS),
     );
     assert!(result.is_ok(), "add_record failed: {:?}", result.err());
 
@@ -85,13 +85,13 @@ fn real_engine_add_record() {
     let stats = engine.get_stats();
     assert!(stats.is_ok(), "get_stats failed: {:?}", stats.err());
 
-    // NOTE: do NOT call destroy_global_instance() here. The Senzing engine is a
+    // NOTE: do NOT call env.destroy() here. The Senzing engine is a
     // process-global singleton shared across every test in this binary. Tearing
-    // it down mid-suite leaves the singleton's is_initialized flag true while the
-    // native engine is gone, so the next test's get_instance() returns a DEAD
-    // engine and add_record()/get_stats() fail. Process exit reclaims the
-    // singleton. The suite is also run with --test-threads=1 (see ci.yml) so
-    // parallel get_instance() init cannot race.
+    // it down mid-suite marks the environment destroyed while other tests still
+    // hold Arc clones, so the next test's get_instance() returns a DEAD engine
+    // and add_record()/get_stats() fail. Process exit reclaims the singleton.
+    // The suite is also run with --test-threads=1 (see ci.yml) so parallel
+    // get_instance() init cannot race.
 }
 
 /// Confirms a deliberately malformed record is classified for the dead-letter
@@ -119,7 +119,7 @@ fn real_engine_bad_record_is_dead_lettered() {
         &info.data_source,
         &info.record_id,
         body,
-        Some(SzFlags::ADD_RECORD_DEFAULT),
+        Some(SzFlags::ADD_RECORD_DEFAULT_FLAGS),
     ) {
         // The consumer treats this engine-level bad-input class as a dead-letter,
         // never fatal.

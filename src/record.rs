@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use sz_rust_sdk::prelude::SzError;
+use sz_rust_sdk::prelude::{ErrorCategory, SzError};
 
 /// The DATA_SOURCE / RECORD_ID extracted from a message body, used both as
 /// `add_record` arguments and for reject logging (mirrors the Python).
@@ -82,21 +82,36 @@ pub enum ErrorClass {
     Fatal,
 }
 
-/// Classifies a Senzing engine error the same way the Python consumer does:
+/// Classifies a Senzing engine error the same way the Python consumer does,
+/// using the v4.3.1 SDK's STRUCTURED error API (`SzError::is_bad_input` /
+/// `SzError::is` + `ErrorCategory` / `SzError::error_code`) rather than matching
+/// on the Display string. Under the hood the SDK derives every engine error from
+/// `getLastExceptionCode()` -> generated code table -> typed variant, so the code
+/// and category are authoritative.
 ///
-/// * `SzBadInputError` / `SzRetryTimeoutExceededError` -> dead-letter.
-/// * Any error whose message contains `SENZ0082` (DQM plugin error, e.g. an
-///   invalid name like `**`) -> dead-letter, even though the SDK may not map it
-///   to `BadInput`.
+/// * Bad-input errors — `ErrorCategory::BadInput` and its subtypes `NotFound` /
+///   `UnknownDataSource` (`is_bad_input()`) -> dead-letter. This mirrors the
+///   Python `SzBadInputError` catch: in the Senzing C# hierarchy
+///   `SzUnknownDataSourceException` is itself an `SzBadInputException`, so an
+///   unregistered data source is bad input, not a fatal.
+/// * Retry-timeout — `SENZ0010`, which v4.3.1 maps to
+///   `SzError::RetryTimeoutExceeded` (`ErrorCategory::RetryTimeoutExceeded`) ->
+///   dead-letter. The engine exhausted its internal retry budget for THIS record
+///   (e.g. a lock/deadlock it could not clear); the record was not added, so we
+///   reject it and keep serving the queue instead of treating it as fatal. The
+///   pre-v4.3.1 coarse bucketing could not express retry-timeout distinctly
+///   (it fell through to a non-retryable class); the structured category fixes
+///   that — this is the bug this bump exists to fix.
+/// * `SENZ0082` (DQM plugin bad-input, e.g. an invalid name like `**`) maps to
+///   `SzError::Unknown` in the generated code table, so `is_bad_input()` does not
+///   catch it; we match it by its structured error CODE (82), not a Display
+///   substring.
 /// * Everything else -> fatal (graceful shutdown).
 pub fn classify_error(err: &SzError) -> ErrorClass {
-    if matches!(
-        err,
-        SzError::BadInput { .. } | SzError::RetryTimeoutExceeded { .. }
-    ) {
-        return ErrorClass::BadInputOrTimeout;
-    }
-    if err.to_string().contains("SENZ0082") {
+    if err.is_bad_input()
+        || err.is(ErrorCategory::RetryTimeoutExceeded)
+        || err.error_code() == Some(82)
+    {
         return ErrorClass::BadInputOrTimeout;
     }
     ErrorClass::Fatal
@@ -105,6 +120,10 @@ pub fn classify_error(err: &SzError) -> ErrorClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: build an engine error carrying a specific numeric code, exactly
+    // as the SDK does internally (`ErrorContext::with_code`), without needing the
+    // native library loaded.
+    use sz_rust_sdk::prelude::{ErrorContext, SzComponent};
 
     #[test]
     fn parses_data_source_and_record_id() {
@@ -169,8 +188,16 @@ mod tests {
 
     #[test]
     fn senz0082_is_dead_lettered() {
-        // An unmapped code surfaced as Unknown but containing SENZ0082.
-        let e = SzError::unknown("Error: SENZ0082 invalid name");
+        // SENZ0082 (DQM plugin bad input) maps to SzError::Unknown in the SDK
+        // code table, so is_bad_input() does NOT catch it. The consumer matches
+        // it by its STRUCTURED error code (82) — build the error the same way the
+        // SDK does (Unknown variant carrying code 82), not via a Display string.
+        let e = SzError::Unknown(ErrorContext::with_code(
+            "Error: SENZ0082 invalid name",
+            82,
+            SzComponent::Engine,
+        ));
+        assert_eq!(e.error_code(), Some(82));
         assert_eq!(classify_error(&e), ErrorClass::BadInputOrTimeout);
     }
 

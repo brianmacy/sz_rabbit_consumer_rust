@@ -53,21 +53,33 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = runtime.block_on(sz_rabbit_consumer::run(config, env));
+    // Pass a CLONE to `run`; `main` keeps its own reference so it can perform the
+    // v4.3.1 ownership-based teardown (`Arc<Self>::destroy()`) afterwards. `run`
+    // and its worker/stats threads drop all their clones before returning when
+    // `all_workers_joined` is true, leaving `main`'s clone as the SOLE owner —
+    // which is exactly what `destroy()` requires (it `Arc::try_unwrap`s).
+    let result = runtime.block_on(sz_rabbit_consumer::run(config, Arc::clone(&env)));
 
     // FIX 2 (use-after-free guard): only tear down the Senzing environment when
     // EVERY engine worker thread actually finished. `run()` does a bounded join
     // within the shutdown grace and reports `all_workers_joined`. If a worker is
-    // still parked inside an uninterruptible `add_record`, calling
-    // `destroy_global_instance()` would free the native engine out from under the
-    // live call -> segfault. In that case we SKIP the destroy and let process
-    // exit reclaim everything: a leak-on-exit is acceptable, a use-after-free is
-    // not. A startup `Err` from `run()` (e.g. RabbitMQ connect failed) is also
-    // treated conservatively as "do not destroy".
+    // still parked inside an uninterruptible `add_record`, calling `env.destroy()`
+    // would free the native engine out from under the live call -> segfault. In
+    // that case we SKIP the destroy and let process exit reclaim everything: a
+    // leak-on-exit is acceptable, a use-after-free is not. A startup `Err` from
+    // `run()` (e.g. RabbitMQ connect failed) is also treated conservatively as
+    // "do not destroy".
+    //
+    // v4.3.1 replaced the static `destroy_global_instance()` with an
+    // ownership-based `Arc<Self>::destroy()` that only succeeds when this is the
+    // SOLE remaining reference. When `all_workers_joined` is true every worker/
+    // stats clone has been dropped, so `main`'s `env` is that sole owner. (If a
+    // clone somehow lingered, `destroy()` returns an error instead of freeing
+    // shared state — a strictly safer failure mode than the old static call.)
     match &result {
         Ok(outcome) => {
             if outcome.all_workers_joined {
-                if let Err(e) = SzEnvironmentCore::destroy_global_instance() {
+                if let Err(e) = env.destroy() {
                     tracing::warn!("error destroying Senzing environment: {e}");
                 }
             } else {

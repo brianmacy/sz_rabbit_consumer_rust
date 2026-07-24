@@ -67,7 +67,7 @@ fn add_record_flags(info: bool) -> Option<SzFlags> {
     if info {
         Some(SzFlags::from_bits_retain(SZ_WITH_INFO_BITS))
     } else {
-        Some(SzFlags::ADD_RECORD_DEFAULT)
+        Some(SzFlags::ADD_RECORD_DEFAULT_FLAGS)
     }
 }
 
@@ -125,7 +125,7 @@ pub struct RunOutcome {
     /// `true` only if EVERY engine worker thread actually finished before the
     /// shutdown grace elapsed. When `false`, a worker may still be parked inside
     /// an uninterruptible `add_record` call holding the native engine; calling
-    /// `SzEnvironmentCore::destroy_global_instance()` then would free engine
+    /// `env.destroy()` (the v4.3.1 ownership-based teardown) then would free engine
     /// state out from under it -> use-after-free / segfault. `main` must SKIP the
     /// destroy in that case and let process exit reclaim everything (FIX 2).
     pub all_workers_joined: bool,
@@ -468,7 +468,7 @@ pub async fn run(config: Config, env: Arc<SzEnvironmentCore>) -> Result<RunOutco
     }
 
     // --- Shutdown ------------------------------------------------------------
-    // FIX 2: we must NOT call `destroy_global_instance()` (in `main`) while any
+    // FIX 2: we must NOT call `env.destroy()` (in `main`) while any
     // worker is still inside an uninterruptible `add_record` — that frees the
     // native engine out from under the live call => use-after-free / segfault.
     // But we also must NOT block shutdown UNBOUNDED on a stuck worker (past
@@ -819,7 +819,10 @@ mod tests {
 
     #[test]
     fn flags_default_when_info_unset() {
-        assert_eq!(add_record_flags(false), Some(SzFlags::ADD_RECORD_DEFAULT));
+        assert_eq!(
+            add_record_flags(false),
+            Some(SzFlags::ADD_RECORD_DEFAULT_FLAGS)
+        );
         assert_eq!(
             add_record_flags(false).unwrap().bits() & SZ_WITH_INFO_BITS,
             0
